@@ -1,0 +1,559 @@
+{
+  "name": "Prod Recurly Paid Invoice \u2192 Classify \u2192 Slack",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "recurly-paid-invoice",
+        "authentication": "basicAuth",
+        "options": {}
+      },
+      "id": "00223f8c-29c8-48bb-b79d-47914f074493",
+      "name": "Webhook - Recurly",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        1456
+      ],
+      "webhookId": "your-webhook-id-here",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Recurly endpoint Basic Auth - PROD + QA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://v3.recurly.com/invoices/number-RINV-{{ $json.invoice_number }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.recurly.v2021-02-25+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a3e49f10-f8fd-4683-8920-412c8925f39e",
+      "name": "Recurly API - Get Invoice details1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1840,
+        1456
+      ],
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "PROD - Recurly Private key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nlet data = null;\nif (input.body && input.body.paid_charge_invoice_notification) {\n  data = input.body.paid_charge_invoice_notification;\n} else if (input.paid_charge_invoice_notification) {\n  data = input.paid_charge_invoice_notification;\n} else if (input.body && typeof input.body === 'object') {\n  const notifKey = Object.keys(input.body).find(k => k.includes('notification'));\n  data = notifKey ? input.body[notifKey] : input.body;\n} else {\n  const notifKey = Object.keys(input).find(k => k.includes('notification'));\n  data = notifKey ? input[notifKey] : input;\n}\nif (!data) throw new Error('Could not find notification data. Check webhook output.');\nconst account = data.account || {};\nconst invoice = data.invoice || {};\nlet subIds = [];\nif (invoice.subscription_ids) {\n  const raw = invoice.subscription_ids.subscription_id || invoice.subscription_ids;\n  subIds = Array.isArray(raw) ? raw : (raw ? [raw] : []);\n}\nconst extractValue = (field) => {\n  if (!field) return '0';\n  if (typeof field === 'string') return field;\n  if (field._ !== undefined) return field._;\n  return '0';\n};\nconst totalCents = parseInt(extractValue(invoice.total_in_cents), 10);\nconst subtotalCents = parseInt(extractValue(invoice.subtotal_in_cents), 10);\nconst taxCents = parseInt(extractValue(invoice.tax_in_cents), 10);\nconst createdAt = invoice.created_at?._ || invoice.created_at || '';\nconst closedAt = invoice.closed_at?._ || invoice.closed_at || '';\nconst collectionMethod = invoice.collection_method || '';\nconst invoiceNumber = extractValue(invoice.invoice_number);\nconst lineItems = invoice.line_items || [];\nconst creditPayments = invoice.credit_payments || [];\nreturn [{\n  json: {\n    account_code: account.account_code || '',\n    email: account.email || '',\n    company_name: account.company_name || '',\n    first_name: account.first_name || '',\n    last_name: account.last_name || '',\n    origin: invoice.origin || '',\n    invoice_uuid: invoice.uuid || '',\n    invoice_number: invoiceNumber,\n    currency: invoice.currency || 'USD',\n    total_cents: totalCents,\n    total_display: '$' + (totalCents / 100).toFixed(2),\n    subtotal_cents: subtotalCents,\n    subtotal_display: '$' + (subtotalCents / 100).toFixed(2),\n    tax_cents: taxCents,\n    tax_display: '$' + (taxCents / 100).toFixed(2),\n    created_at: createdAt,\n    closed_at: closedAt,\n    collection_method: collectionMethod,\n    line_items: lineItems,\n    credit_payments: creditPayments,\n    subscription_id: subIds[0] || '',\n  }\n}];"
+      },
+      "id": "facb94e2-10c2-47e7-8eee-53ad9b355f9a",
+      "name": "Extract Fields1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1648,
+        1456
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://v3.recurly.com/subscriptions/uuid-{{ $('Extract Fields1').item.json.subscription_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.recurly.v2021-02-25+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ac5ea132-490c-47b7-9dfe-e1159221c60f",
+      "name": "Recurly API - Get Subscription1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2048,
+        1456
+      ],
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "PROD - Recurly Private key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhookData = $('Extract Fields1').first().json;\nconst invoiceData = $('Recurly API - Get Invoice details1').first().json;\nconst sub = $input.first().json;\n\nconst planCode = (sub.plan && sub.plan.code) || '';\nconst planName = (sub.plan && sub.plan.name) || '';\nconst quantity = sub.quantity || 1;\nconst origin = webhookData.origin;\n\nlet customerType = 'UNKNOWN';\nlet totalCreditApplied = 0;\n\nif (origin === 'purchase') {\n  customerType = 'NEW_CUSTOMER';\n} else if (origin === 'renewal') {\n  customerType = 'RENEWAL';\n} else if (origin === 'immediate_change') {\n  const creditPayments = invoiceData.credit_payments || [];\n  const upgradeCredits = creditPayments.filter(cp => \n    cp.amount > 0 && cp.original_invoice && cp.original_invoice.type === 'credit'\n  );\n  const hasCreditFromPriorPlan = upgradeCredits.length > 0;\n  customerType = hasCreditFromPriorPlan ? 'UPGRADE_TO_ANNUAL' : 'EXPANSION';\n  \n  if (hasCreditFromPriorPlan) {\n    totalCreditApplied = upgradeCredits.reduce((sum, cp) => sum + (cp.amount || 0), 0);\n  }\n}\n\n// Net amount the customer actually paid (dollars, not cents \u2014 invoice API returns dollars)\nconst invoiceTotal = invoiceData.total || (webhookData.total_cents / 100);\nconst netAmount = invoiceTotal - totalCreditApplied;\n\nreturn [{\n  json: {\n    ...webhookData,\n    customer_type: customerType,\n    plan_code: planCode,\n    plan_name: planName,\n    quantity: quantity,\n    invoice_total: invoiceTotal,\n    credit_applied: totalCreditApplied,\n    net_amount: netAmount,\n    net_amount_display: '$' + netAmount.toFixed(2),\n    // Keep total_display as-is for other branches, but add a smart display\n    // that shows net for upgrades, full total otherwise\n    display_amount: customerType === 'UPGRADE_TO_ANNUAL' \n      ? '$' + netAmount.toFixed(2) \n      : webhookData.total_display,\n  }\n}];"
+      },
+      "id": "f1a2b04a-d2f7-454a-a1a9-005c1aec49a7",
+      "name": "Classify Customer1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2256,
+        1456
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst typeConfig = {\n  'NEW_CUSTOMER':      { emoji: '\ud83c\udd95', label: 'New Customer' },\n  'EXPANSION':         { emoji: '\ud83d\udcc8', label: 'Expansion (More Seats)' },\n  'UPGRADE_TO_ANNUAL': { emoji: '\u2b06\ufe0f', label: 'Upgrade to Annual' },\n  'RENEWAL':           { emoji: '\ud83d\udd04', label: 'Renewal' },\n};\nconst config = typeConfig[d.customer_type] || { emoji: '\ud83d\udcb0', label: d.customer_type };\n\n// Random celebration GIFs\nconst winGifs = [\n  'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',\n  'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif',\n  'https://media.giphy.com/media/artj92V8o75VPL7AeQ/giphy.gif',\n  'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',\n  'https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif',\n  'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',\n  'https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif',\n  'https://media.giphy.com/media/l4JyOCNEfXxJKWyuY/giphy.gif',\n];\nconst randomGif = winGifs[Math.floor(Math.random() * winGifs.length)];\n\nconst invoiceDate = d.created_at ? new Date(d.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : 'N/A';\nconst accountId = d.account_code.replace('organization-', '');\nconst accountUrl = `https://internal.katalon.com/accounts?accountId=${accountId}`;\nconst companyName = d.company_name || 'N/A';\nconst netDisplay = '$' + (d.net_amount || 0).toFixed(2);\n\nconst message = `${config.emoji} *${config.label}* | _Company:_ ${companyName} | _Plan:_ ${d.plan_name || d.plan_code || 'N/A'} | _Amount:_ ${netDisplay} | _Seats:_ ${d.quantity} | _Date:_ ${invoiceDate} | _Account:_ <${accountUrl}|${d.account_code}>\\n${randomGif}`;\n\nconst fallbackText = `${config.emoji} ${config.label}\\nCompany: ${companyName}\\nPlan: ${d.plan_name || d.plan_code || 'N/A'}\\nAmount: ${netDisplay}\\nSeats: ${d.quantity}\\nDate: ${invoiceDate}\\nAccount: ${accountUrl}\\n${randomGif}`;\n\nreturn [{\n  json: {\n    text: message,\n    fallback_text: fallbackText,\n    gif_url: randomGif,\n  }\n}];"
+      },
+      "id": "8e837fd6-c603-4e3c-90c1-0f1b5d0f1104",
+      "name": "Format Slack Message2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3136,
+        1376
+      ]
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3136,
+        1664
+      ],
+      "id": "3fa4bb95-691c-4c50-8e54-818c7b13d2a6",
+      "name": "No Operation, do nothing1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "11bdafad-a969-4f05-8510-d02546e8a225",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "true_platform_teams_monthly",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "RENEWAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2512,
+        1568
+      ],
+      "id": "6458adff-247c-47d5-8439-601207a4cedf",
+      "name": "If Renewal1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "11bdafad-a969-4f05-8510-d02546e8a225",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "true_platform_teams_monthly",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "NEW_CUSTOMER",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2512,
+        1376
+      ],
+      "id": "5b4304b6-123d-48ce-b58c-90dab92b967c",
+      "name": "If New1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fe9f181e-9a44-4b25-9a9d-d969e967c390",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "=true_platform_teams_annual",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "UPGRADE_TO_ANNUAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2512,
+        1968
+      ],
+      "id": "ae9eb092-4bcd-4ffc-ab34-c876ee9ff461",
+      "name": "If Upgrade1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "11bdafad-a969-4f05-8510-d02546e8a225",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "true_platform_teams_monthly",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "EXPANSION",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2512,
+        1760
+      ],
+      "id": "ff520315-26c9-4d6a-9265-aa6c0cf599ce",
+      "name": "If Expansion1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst typeConfig = {\n  'NEW_CUSTOMER':      { emoji: '\ud83c\udd95', label: 'New Customer' },\n  'EXPANSION':         { emoji: '\ud83d\udcc8', label: 'Expansion (More Seats)' },\n  'UPGRADE_TO_ANNUAL': { emoji: '\u2b06\ufe0f', label: 'Upgrade to Annual' },\n  'RENEWAL':           { emoji: '\ud83d\udd04', label: 'Renewal' },\n};\nconst config = typeConfig[d.customer_type] || { emoji: '\ud83d\udcb0', label: d.customer_type };\n\n// Random celebration GIFs\nconst winGifs = [\n  'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',\n  'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif',\n  'https://media.giphy.com/media/artj92V8o75VPL7AeQ/giphy.gif',\n  'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',\n  'https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif',\n  'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',\n  'https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif',\n  'https://media.giphy.com/media/l4JyOCNEfXxJKWyuY/giphy.gif',\n];\nconst randomGif = winGifs[Math.floor(Math.random() * winGifs.length)];\n\nconst invoiceDate = d.created_at ? new Date(d.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : 'N/A';\nconst accountId = d.account_code.replace('organization-', '');\nconst accountUrl = `https://internal.katalon.com/accounts?accountId=${accountId}`;\nconst companyName = d.company_name || 'N/A';\nconst netDisplay = '$' + (d.net_amount || 0).toFixed(2);\n\nconst message = `${config.emoji} *${config.label}* | _Company:_ ${companyName} | _Plan:_ ${d.plan_name || d.plan_code || 'N/A'} | _Amount:_ ${netDisplay} | _Seats:_ ${d.quantity} | _Date:_ ${invoiceDate} | _Account:_ <${accountUrl}|${d.account_code}>\\n${randomGif}`;\n\nconst fallbackText = `${config.emoji} ${config.label}\\nCompany: ${companyName}\\nPlan: ${d.plan_name || d.plan_code || 'N/A'}\\nAmount: ${netDisplay}\\nSeats: ${d.quantity}\\nDate: ${invoiceDate}\\nAccount: ${accountUrl}\\n${randomGif}`;\n\nreturn [{\n  json: {\n    text: message,\n    fallback_text: fallbackText,\n    gif_url: randomGif,\n  }\n}];"
+      },
+      "id": "e5824f21-505a-4fdd-8027-59fa18103143",
+      "name": "Format Slack Message3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3136,
+        1968
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0AU106LHAN",
+          "mode": "id"
+        },
+        "text": "={{ $json.fallback_text }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        3408,
+        1968
+      ],
+      "id": "3509af62-90d9-45d7-9f4b-564b1f257247",
+      "name": "Send a message2",
+      "webhookId": "your-webhook-id-here",
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Digital Low Touch Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C07U5R2PMFV",
+          "mode": "id"
+        },
+        "text": "={{ $json.fallback_text }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        3392,
+        1376
+      ],
+      "id": "72a3dd06-5b73-4e86-809b-918a7339fb57",
+      "name": "Send a message3",
+      "webhookId": "your-webhook-id-here",
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Digital Low Touch Bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Recurly": {
+      "main": [
+        [
+          {
+            "node": "Extract Fields1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recurly API - Get Invoice details1": {
+      "main": [
+        [
+          {
+            "node": "Recurly API - Get Subscription1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Fields1": {
+      "main": [
+        [
+          {
+            "node": "Recurly API - Get Invoice details1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recurly API - Get Subscription1": {
+      "main": [
+        [
+          {
+            "node": "Classify Customer1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Customer1": {
+      "main": [
+        [
+          {
+            "node": "If Upgrade1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If New1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If Renewal1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If Expansion1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message2": {
+      "main": [
+        [
+          {
+            "node": "Send a message3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Renewal1": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If New1": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Upgrade1": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Expansion1": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message3": {
+      "main": [
+        [
+          {
+            "node": "Send a message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "d0480729-fe3e-4744-9f7e-b151b917523b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e736ce5fc5bb3736b941b937b6e4f18d7d10c2045b8cf8a7048d38ff090ed6b6"
+  },
+  "id": "bkoirtU2reTrRdRH",
+  "tags": []
+}

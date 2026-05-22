@@ -1,0 +1,560 @@
+{
+  "name": "QA Recurly Paid Invoice \u2192 Classify \u2192 Slack",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "test-in-QA",
+        "authentication": "basicAuth",
+        "options": {}
+      },
+      "id": "9fffd2be-aa8e-4f93-90e0-8d7b1a2133a9",
+      "name": "Webhook - Recurly",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        1808,
+        160
+      ],
+      "webhookId": "your-webhook-id-here",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Recurly endpoint Basic Auth - PROD + QA"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\nlet data = null;\nif (input.body && input.body.paid_charge_invoice_notification) {\n  data = input.body.paid_charge_invoice_notification;\n} else if (input.paid_charge_invoice_notification) {\n  data = input.paid_charge_invoice_notification;\n} else if (input.body && typeof input.body === 'object') {\n  const notifKey = Object.keys(input.body).find(k => k.includes('notification'));\n  data = notifKey ? input.body[notifKey] : input.body;\n} else {\n  const notifKey = Object.keys(input).find(k => k.includes('notification'));\n  data = notifKey ? input[notifKey] : input;\n}\nif (!data) throw new Error('Could not find notification data. Check webhook output.');\nconst account = data.account || {};\nconst invoice = data.invoice || {};\nlet subIds = [];\nif (invoice.subscription_ids) {\n  const raw = invoice.subscription_ids.subscription_id || invoice.subscription_ids;\n  subIds = Array.isArray(raw) ? raw : (raw ? [raw] : []);\n}\nconst extractValue = (field) => {\n  if (!field) return '0';\n  if (typeof field === 'string') return field;\n  if (field._ !== undefined) return field._;\n  return '0';\n};\nconst totalCents = parseInt(extractValue(invoice.total_in_cents), 10);\nconst subtotalCents = parseInt(extractValue(invoice.subtotal_in_cents), 10);\nconst taxCents = parseInt(extractValue(invoice.tax_in_cents), 10);\nconst createdAt = invoice.created_at?._ || invoice.created_at || '';\nconst closedAt = invoice.closed_at?._ || invoice.closed_at || '';\nconst collectionMethod = invoice.collection_method || '';\nconst invoiceNumber = extractValue(invoice.invoice_number);\nconst lineItems = invoice.line_items || [];\nconst creditPayments = invoice.credit_payments || [];\nreturn [{\n  json: {\n    account_code: account.account_code || '',\n    email: account.email || '',\n    company_name: account.company_name || '',\n    first_name: account.first_name || '',\n    last_name: account.last_name || '',\n    origin: invoice.origin || '',\n    invoice_uuid: invoice.uuid || '',\n    invoice_number: invoiceNumber,\n    currency: invoice.currency || 'USD',\n    total_cents: totalCents,\n    total_display: '$' + (totalCents / 100).toFixed(2),\n    subtotal_cents: subtotalCents,\n    subtotal_display: '$' + (subtotalCents / 100).toFixed(2),\n    tax_cents: taxCents,\n    tax_display: '$' + (taxCents / 100).toFixed(2),\n    created_at: createdAt,\n    closed_at: closedAt,\n    collection_method: collectionMethod,\n    line_items: lineItems,\n    credit_payments: creditPayments,\n    subscription_id: subIds[0] || '',\n  }\n}];"
+      },
+      "id": "12374a7e-2c25-4c51-9029-726e4562c980",
+      "name": "Extract Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://v3.recurly.com/subscriptions/uuid-{{ $('Extract Fields').item.json.subscription_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.recurly.v2021-02-25+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fea2949f-15ee-4672-b492-70cfeebb2c42",
+      "name": "Recurly API - Get Subscription",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2432,
+        160
+      ],
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Recurly Private API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhookData = $('Extract Fields').first().json;\nconst invoiceData = $('Recurly API - Get Invoice details1').first().json;\nconst sub = $input.first().json;\n\nconst planCode = (sub.plan && sub.plan.code) || '';\nconst planName = (sub.plan && sub.plan.name) || '';\nconst quantity = sub.quantity || 1;\nconst origin = webhookData.origin;\n\nlet customerType = 'UNKNOWN';\nlet totalCreditApplied = 0;\n\nif (origin === 'purchase') {\n  customerType = 'NEW_CUSTOMER';\n} else if (origin === 'renewal') {\n  customerType = 'RENEWAL';\n} else if (origin === 'immediate_change') {\n  const creditPayments = invoiceData.credit_payments || [];\n  const upgradeCredits = creditPayments.filter(cp => \n    cp.amount > 0 && cp.original_invoice && cp.original_invoice.type === 'credit'\n  );\n  const hasCreditFromPriorPlan = upgradeCredits.length > 0;\n  customerType = hasCreditFromPriorPlan ? 'UPGRADE_TO_ANNUAL' : 'EXPANSION';\n  \n  if (hasCreditFromPriorPlan) {\n    totalCreditApplied = upgradeCredits.reduce((sum, cp) => sum + (cp.amount || 0), 0);\n  }\n}\n\n// Net amount the customer actually paid (dollars, not cents \u2014 invoice API returns dollars)\nconst invoiceTotal = invoiceData.total || (webhookData.total_cents / 100);\nconst netAmount = invoiceTotal - totalCreditApplied;\n\nreturn [{\n  json: {\n    ...webhookData,\n    customer_type: customerType,\n    plan_code: planCode,\n    plan_name: planName,\n    quantity: quantity,\n    invoice_total: invoiceTotal,\n    credit_applied: totalCreditApplied,\n    net_amount: netAmount,\n    net_amount_display: '$' + netAmount.toFixed(2),\n    // Keep total_display as-is for other branches, but add a smart display\n    // that shows net for upgrades, full total otherwise\n    display_amount: customerType === 'UPGRADE_TO_ANNUAL' \n      ? '$' + netAmount.toFixed(2) \n      : webhookData.total_display,\n  }\n}];"
+      },
+      "id": "a6346484-3ca7-4913-a5af-9785b891832b",
+      "name": "Classify Customer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst typeConfig = {\n  'NEW_CUSTOMER':      { emoji: '\ud83c\udd95', label: 'New Customer' },\n  'EXPANSION':         { emoji: '\ud83d\udcc8', label: 'Expansion (More Seats)' },\n  'UPGRADE_TO_ANNUAL': { emoji: '\u2b06\ufe0f', label: 'Upgrade to Annual' },\n  'RENEWAL':           { emoji: '\ud83d\udd04', label: 'Renewal' },\n};\nconst config = typeConfig[d.customer_type] || { emoji: '\ud83d\udcb0', label: d.customer_type };\n\n// Random celebration GIFs\nconst winGifs = [\n  'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',\n  'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif',\n  'https://media.giphy.com/media/artj92V8o75VPL7AeQ/giphy.gif',\n  'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',\n  'https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif',\n  'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',\n  'https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif',\n  'https://media.giphy.com/media/l4JyOCNEfXxJKWyuY/giphy.gif',\n];\nconst randomGif = winGifs[Math.floor(Math.random() * winGifs.length)];\n\nconst invoiceDate = d.created_at ? new Date(d.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : 'N/A';\nconst accountId = d.account_code.replace('organization-', '');\nconst accountUrl = `https://internal.katalon.com/accounts?accountId=${accountId}`;\n\nconst netDisplay = '$' + (d.net_amount || 0).toFixed(2);\n\nconst message = `${config.emoji} *${config.label}* | _Plan:_ ${d.plan_name || d.plan_code || 'N/A'} | _Amount:_ ${netDisplay} | _Seats:_ ${d.quantity} | _Date:_ ${invoiceDate} | _Account:_ <${accountUrl}|${d.account_code}>\\n${randomGif}`;\n\nconst fallbackText = `${config.emoji} ${config.label}\\nPlan: ${d.plan_name || d.plan_code || 'N/A'}\\nAmount: ${netDisplay}\\nSeats: ${d.quantity}\\nDate: ${invoiceDate}\\nAccount: ${accountUrl}\\n${randomGif}`;\n\nreturn [{\n  json: {\n    text: message,\n    fallback_text: fallbackText,\n    gif_url: randomGif,\n  }\n}];"
+      },
+      "id": "9547e7a7-e77f-45a9-a2a8-4423703f1bcb",
+      "name": "Format Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3520,
+        80
+      ]
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3520,
+        368
+      ],
+      "id": "8af158bf-5873-47cb-b4f2-38a8af6f08c2",
+      "name": "No Operation, do nothing"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "11bdafad-a969-4f05-8510-d02546e8a225",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "true_platform_teams_monthly",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "RENEWAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2896,
+        272
+      ],
+      "id": "0671b53c-bb7c-48d5-8a1e-cd31011634e2",
+      "name": "If Renewal"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "11bdafad-a969-4f05-8510-d02546e8a225",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "true_platform_teams_monthly",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "NEW_CUSTOMER",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2896,
+        80
+      ],
+      "id": "08c24294-bf11-416e-862c-236d7937655b",
+      "name": "If New"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "fe9f181e-9a44-4b25-9a9d-d969e967c390",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "=true_platform_teams_annual",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "UPGRADE_TO_ANNUAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2896,
+        672
+      ],
+      "id": "2b478c1b-044a-4c59-a1f1-2e7f9ed52c86",
+      "name": "If Upgrade"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "11bdafad-a969-4f05-8510-d02546e8a225",
+              "leftValue": "={{ $json.plan_code }}",
+              "rightValue": "true_platform_teams_monthly",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "5e939410-3e09-4e44-8e5d-35ca89355048",
+              "leftValue": "={{ $json.customer_type }}",
+              "rightValue": "EXPANSION",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2896,
+        464
+      ],
+      "id": "ea2e611a-3b02-4582-8bf1-39ebe3a786e9",
+      "name": "If Expansion"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst typeConfig = {\n  'NEW_CUSTOMER':      { emoji: '\ud83c\udd95', label: 'New Customer' },\n  'EXPANSION':         { emoji: '\ud83d\udcc8', label: 'Expansion (More Seats)' },\n  'UPGRADE_TO_ANNUAL': { emoji: '\u2b06\ufe0f', label: 'Upgrade to Annual' },\n  'RENEWAL':           { emoji: '\ud83d\udd04', label: 'Renewal' },\n};\nconst config = typeConfig[d.customer_type] || { emoji: '\ud83d\udcb0', label: d.customer_type };\n\n// Random celebration GIFs\nconst winGifs = [\n  'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',\n  'https://media.giphy.com/media/3o7abKhOpu0NwenH3O/giphy.gif',\n  'https://media.giphy.com/media/artj92V8o75VPL7AeQ/giphy.gif',\n  'https://media.giphy.com/media/3oz8xAFtqoOUUrsh7W/giphy.gif',\n  'https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif',\n  'https://media.giphy.com/media/26u4cqiYI30juCOGY/giphy.gif',\n  'https://media.giphy.com/media/3ornk57KwDXf81rjWM/giphy.gif',\n  'https://media.giphy.com/media/l4JyOCNEfXxJKWyuY/giphy.gif',\n];\nconst randomGif = winGifs[Math.floor(Math.random() * winGifs.length)];\n\nconst invoiceDate = d.created_at ? new Date(d.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : 'N/A';\nconst accountId = d.account_code.replace('organization-', '');\nconst accountUrl = `https://internal.katalon.com/accounts?accountId=${accountId}`;\n\nconst netDisplay = '$' + (d.net_amount || 0).toFixed(2);\n\nconst message = `${config.emoji} *${config.label}* | _Plan:_ ${d.plan_name || d.plan_code || 'N/A'} | _Amount:_ ${netDisplay} | _Seats:_ ${d.quantity} | _Date:_ ${invoiceDate} | _Account:_ <${accountUrl}|${d.account_code}>\\n${randomGif}`;\n\nconst fallbackText = `${config.emoji} ${config.label}\\nPlan: ${d.plan_name || d.plan_code || 'N/A'}\\nAmount: ${netDisplay}\\nSeats: ${d.quantity}\\nDate: ${invoiceDate}\\nAccount: ${accountUrl}\\n${randomGif}`;\n\nreturn [{\n  json: {\n    text: message,\n    fallback_text: fallbackText,\n    gif_url: randomGif,\n  }\n}];"
+      },
+      "id": "4c627ad4-58b4-4fd2-88d9-28cfb22c8dad",
+      "name": "Format Slack Message1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3520,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0AU106LHAN",
+          "mode": "id"
+        },
+        "text": "={{ $json.fallback_text }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        3792,
+        672
+      ],
+      "id": "b98d0826-91ed-49b2-90da-bd7147a8df15",
+      "name": "Send a message1",
+      "webhookId": "your-webhook-id-here",
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Digital Low Touch Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://v3.recurly.com/invoices/number-{{ $json.invoice_number }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.recurly.v2021-02-25+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0310b755-4348-4e60-b4a5-811bf8483552",
+      "name": "Recurly API - Get Invoice details1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2224,
+        160
+      ],
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Recurly Private API key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0AU106LHAN",
+          "mode": "id"
+        },
+        "text": "={{ $json.fallback_text }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        3776,
+        80
+      ],
+      "id": "6489762f-ecbf-42b6-8f4a-f9a691bebadc",
+      "name": "Send a message",
+      "webhookId": "your-webhook-id-here",
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Digital Low Touch Bot"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Recurly": {
+      "main": [
+        [
+          {
+            "node": "Extract Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Fields": {
+      "main": [
+        [
+          {
+            "node": "Recurly API - Get Invoice details1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recurly API - Get Subscription": {
+      "main": [
+        [
+          {
+            "node": "Classify Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Customer": {
+      "main": [
+        [
+          {
+            "node": "If Upgrade",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If New",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If Renewal",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "If Expansion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Renewal": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If New": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Upgrade": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Expansion": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Operation, do nothing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message1": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recurly API - Get Invoice details1": {
+      "main": [
+        [
+          {
+            "node": "Recurly API - Get Subscription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "8ae0425c-66f1-4202-a706-32523eb8258e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e736ce5fc5bb3736b941b937b6e4f18d7d10c2045b8cf8a7048d38ff090ed6b6"
+  },
+  "id": "P3kVzNXR11N9MH2C",
+  "tags": []
+}
